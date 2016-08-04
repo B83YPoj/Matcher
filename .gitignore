@@ -1,0 +1,20 @@
+# IDE/Editor files
+.idea
+.ensime
+.ensime_cache/
+scorex.yaml
+
+# scala build folders
+target
+
+# dotfiles
+.dockerignore
+.editorconfig
+
+# logs
+scorex.log
+scorex-errors.log
+scorex-*.log
+
+# local settings
+localsettings.json
