@@ -5,25 +5,17 @@ import javax.ws.rs.Path
 import akka.actor.ActorRefFactory
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.Route
-import akka.pattern.ask
-import com.wavesplatform.matcher.{Cancel, Matcher, Order}
+import com.wavesplatform.matcher._
 import io.swagger.annotations._
-import play.api.libs.json.{JsSuccess, JsError, Json}
+import play.api.libs.json.{JsError, JsSuccess, Json}
 import scorex.api.http._
 import scorex.app.RunnableApplication
-import scorex.consensus.mining.BlockGeneratorController._
 import scorex.crypto.encode.Base58
-import scorex.network.BlockchainSynchronizer
-import scorex.transaction.LagonakiTransaction.ValidationResult
-import scorex.transaction.state.wallet.Payment
+import scorex.network.message.Message
+import scorex.network.{Broadcast, NetworkController}
 import scorex.utils.ScorexLogging
-import scorex.waves.settings.Constants
-import scorex.waves.settings.Constants
-import scorex.waves.transaction.SignedPayment
 
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 @Path("/matcher")
 @Api(value = "matcher")
@@ -49,7 +41,7 @@ case class MatcherApiRoute(override val application: RunnableApplication)(implic
       value = "Json with data",
       required = true,
       paramType = "body",
-      dataType = "com.wavesplatform.matcher.Cancel",
+      dataType = "com.wavesplatform.matcher.CancelJS",
       defaultValue = "{\n\t\"spendAddress\":\"spendAddress\",\n\t\"OrderID\":0,\n\t\"signature\":\"signature\"\n}"
     )
   ))
@@ -58,13 +50,16 @@ case class MatcherApiRoute(override val application: RunnableApplication)(implic
       entity(as[String]) { body =>
         postJsonRoute {
           Try(Json.parse(body)).map { js =>
-            js.validate[Cancel] match {
+            js.validate[CancelJS] match {
               case err: JsError =>
                 WrongTransactionJson(err).response
-              case JsSuccess(cancelOrder: Cancel, _) =>
-                if (cancelOrder.isValid) {
-                  JsonResponse(Json.obj("cancelled" -> matcher.cancel(cancelOrder)), StatusCodes.OK)
-                } else InvalidSignature.response
+              case JsSuccess(cancelJS: CancelJS, _) =>
+                cancelJS.cancel match {
+                  case Success(cancelOrder) if cancelOrder.isValid =>
+                    //TODO signed message what order is cancelled (with remaining amount)
+                    JsonResponse(Json.obj("cancelled" -> matcher.cancel(cancelOrder)), StatusCodes.OK)
+                  case _ => WrongJson.response
+                }
             }
           }.getOrElse(WrongJson.response)
         }
@@ -85,7 +80,7 @@ case class MatcherApiRoute(override val application: RunnableApplication)(implic
       value = "Json with data",
       required = true,
       paramType = "body",
-      dataType = "com.wavesplatform.matcher.Payment",
+      dataType = "com.wavesplatform.matcher.OrderJS",
       defaultValue = "{\n\t\"spendAddress\":\"spendAddress\",\n\t\"spendTokenID\":\"spendTokenID\",\n\t\"receiveTokenID\":\"receiveTokenID\",\n\t\"price\":1,\n\t\"amount\":1,\n\t\"signature\":\"signature\"\n}"
     )
   ))
@@ -95,14 +90,16 @@ case class MatcherApiRoute(override val application: RunnableApplication)(implic
       entity(as[String]) { body =>
         postJsonRoute {
           Try(Json.parse(body)).map { js =>
-            js.validate[Order] match {
+            js.validate[OrderJS] match {
               case err: JsError =>
                 WrongTransactionJson(err).response
-              case JsSuccess(order: Order, _) =>
-                if (order.isValid) {
-                  val txs = matcher.place(order)
-                  JsonResponse(Json.obj("matched" -> txs.map(_.json)), StatusCodes.OK)
-                } else InvalidSignature.response
+              case JsSuccess(orderjs: OrderJS, _) =>
+                orderjs.order match {
+                  case Success(order) if order.isValid =>
+                    val txs = matcher.place(order)
+                    JsonResponse(Json.obj("matched" -> txs.map(_.json)), StatusCodes.OK)
+                  case _ => WrongJson.response
+                }
             }
           }.getOrElse(WrongJson.response)
         }
@@ -151,8 +148,16 @@ case class MatcherApiRoute(override val application: RunnableApplication)(implic
             val signature = Base58.decode((js \ "signature").as[String]).get
             val transactionId = Base58.decode((js \ "transactionId").as[String]).get
             val signedTx = matcher.sign(transactionId, signature)
-            //TODO check, whether all signatures are presented
-            JsonResponse(Json.obj("signed" -> signedTx.isSuccess), StatusCodes.OK)
+            signedTx match {
+              case Success(tx) =>
+                if (tx.isCompleted) {
+                  val ntwMsg = Message(ExchangeTransactionMessageSpec, Right(tx), None)
+                  application.networkController ! NetworkController.SendToNetwork(ntwMsg, Broadcast)
+                }
+                JsonResponse(Json.obj("signed" -> true, "broadcasted" -> tx.isCompleted), StatusCodes.OK)
+              case Failure(e) =>
+                JsonResponse(Json.obj("signed" -> false, "error" -> e.getMessage), StatusCodes.OK)
+            }
           }.getOrElse(WrongJson.response)
         }
       }

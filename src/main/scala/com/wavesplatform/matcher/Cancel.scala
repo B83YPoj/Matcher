@@ -1,11 +1,24 @@
 package com.wavesplatform.matcher
 
-case class Cancel(SpendAddress: String, OrderID: Long, Signature: String) {
+import com.google.common.primitives.Longs
+import scorex.account.PublicKeyAccount
+import scorex.crypto.EllipticCurveImpl
 
-  lazy val isValid: Boolean = {
-    //TODO check signature
-    ???
-  }
+import scala.util.Try
+
+case class Cancel(spendAddress: PublicKeyAccount, orderID: Long, signature: Array[Byte]) {
+
+
+  lazy val isValid: Boolean = EllipticCurveImpl.verify(signature, content, spendAddress.publicKey)
+
+  private lazy val content: Array[Byte] = spendAddress.bytes ++ Longs.toByteArray(orderID)
 }
 
 
+
+case class CancelJS(spendAddress: String, orderID: Long, signature: String) {
+  lazy val cancel: Try[Cancel] = {
+    ???
+  }
+
+}
